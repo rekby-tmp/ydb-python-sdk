@@ -1,3 +1,4 @@
+* Use anonymous credentials by default instead of iam metadata (use ydb.driver.credentials_from_env_variables for creds by env var)
 * Add control plane operations for topic api: create, drop
 
 ## 3.0.1b4 ##
