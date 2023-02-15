@@ -47,36 +47,49 @@ class StreamMockForReader(StreamMock):
 @pytest.mark.asyncio
 class TestReaderStream:
     default_batch_size = 1
+    partition_session_id = 2
+    second_partition_session_id = 12
 
     @pytest.fixture()
     def stream(self):
         return StreamMock()
 
     @pytest.fixture()
-    def partition_session(self, default_reader_settings):
-        return PartitionSession(
+    async def partition_session(self, default_reader_settings, stream_reader_started: ReaderStream):
+        partition_session = PartitionSession(
             id=2,
             topic_path=default_reader_settings.topic,
             partition_id=4,
             state=PartitionSession.State.Active,
+            start_commit_range=10,
         )
 
+        assert partition_session.id not in stream_reader_started._partition_sessions
+        stream_reader_started._partition_sessions[partition_session.id] = partition_session
+
+        return stream_reader_started._partition_sessions[partition_session.id]
+
     @pytest.fixture()
-    def second_partition_session(self, default_reader_settings):
-        return PartitionSession(
+    def second_partition_session(self, default_reader_settings, stream_reader_started: ReaderStream):
+        partition_session = PartitionSession(
             id=12,
             topic_path=default_reader_settings.topic,
             partition_id=10,
             state=PartitionSession.State.Active,
+            start_commit_range=50,
         )
+
+        assert partition_session.id not in stream_reader_started._partition_sessions
+        stream_reader_started._partition_sessions[partition_session.id] = partition_session
+
+        return stream_reader_started._partition_sessions[partition_session.id]
+
 
     @pytest.fixture()
     async def stream_reader_started(
         self,
         stream,
         default_reader_settings,
-        partition_session,
-        second_partition_session,
     ) -> ReaderStream:
         reader = ReaderStream(default_reader_settings)
         init_message = object()
@@ -99,53 +112,7 @@ class TestReaderStream:
         read_request = await wait_for_fast(stream.from_client.get())
         assert isinstance(read_request.client_message, StreamReadMessage.ReadRequest)
 
-        stream.from_server.put_nowait(
-            StreamReadMessage.FromServer(
-                server_status=ServerStatus(ydb_status_codes_pb2.StatusIds.SUCCESS, []),
-                server_message=StreamReadMessage.StartPartitionSessionRequest(
-                    partition_session=StreamReadMessage.PartitionSession(
-                        partition_session_id=partition_session.id,
-                        path=partition_session.topic_path,
-                        partition_id=partition_session.partition_id,
-                    ),
-                    committed_offset=0,
-                    partition_offsets=OffsetsRange(
-                        start=0,
-                        end=0,
-                    ),
-                ),
-            )
-        )
         await start
-
-        start_partition_resp = await wait_for_fast(stream.from_client.get())
-        assert isinstance(
-            start_partition_resp.client_message,
-            StreamReadMessage.StartPartitionSessionResponse,
-        )
-
-        stream.from_server.put_nowait(
-            StreamReadMessage.FromServer(
-                server_status=ServerStatus(ydb_status_codes_pb2.StatusIds.SUCCESS, []),
-                server_message=StreamReadMessage.StartPartitionSessionRequest(
-                    partition_session=StreamReadMessage.PartitionSession(
-                        partition_session_id=second_partition_session.id,
-                        path=second_partition_session.topic_path,
-                        partition_id=second_partition_session.partition_id,
-                    ),
-                    committed_offset=0,
-                    partition_offsets=OffsetsRange(
-                        start=0,
-                        end=0,
-                    ),
-                ),
-            )
-        )
-        start_partition_resp = await wait_for_fast(stream.from_client.get())
-        assert isinstance(
-            start_partition_resp.client_message,
-            StreamReadMessage.StartPartitionSessionResponse,
-        )
 
         await asyncio.sleep(0)
         with pytest.raises(asyncio.QueueEmpty):
@@ -170,13 +137,13 @@ class TestReaderStream:
         await stream_reader_started.close()
 
     @staticmethod
-    def create_message(partition_session: PartitionSession, seqno: int):
+    def create_message(partition_session: PartitionSession, seqno: int, offset_delta: int):
         return PublicMessage(
             seqno=seqno,
             created_at=datetime.datetime(2023, 2, 3, 14, 15),
             message_group_id="test-message-group",
             session_metadata={},
-            offset=seqno + 1,
+            offset=partition_session.start_commit_range + offset_delta,
             written_at=datetime.datetime(2023, 2, 3, 14, 16),
             producer_id="test-producer-id",
             data=bytes(),
@@ -309,6 +276,7 @@ class TestReaderStream:
         test_partition_id = partition_session.partition_id + 1
         test_partition_session_id = partition_session.id + 1
         test_topic_path = default_reader_settings.topic + "-asd"
+        test_partition_committed_offset = 18
 
         stream.from_server.put_nowait(
             StreamReadMessage.FromServer(
@@ -319,7 +287,7 @@ class TestReaderStream:
                         path=test_topic_path,
                         partition_id=test_partition_id,
                     ),
-                    committed_offset=0,
+                    committed_offset=test_partition_committed_offset,
                     partition_offsets=OffsetsRange(
                         start=0,
                         end=0,
@@ -344,6 +312,7 @@ class TestReaderStream:
             state=PartitionSession.State.Active,
             topic_path=test_topic_path,
             partition_id=test_partition_id,
+            start_commit_range=test_partition_committed_offset,
         )
 
     async def test_partition_stop_force(self, stream, stream_reader, partition_session):
@@ -652,17 +621,17 @@ class TestReaderStream:
     async def test_receive_batch_nowait(self, stream, stream_reader, partition_session):
         assert stream_reader.receive_batch_nowait() is None
 
-        mess1 = self.create_message(partition_session, 1)
+        mess1 = self.create_message(partition_session, 1, 1)
         await self.send_message(stream_reader, mess1)
 
-        mess2 = self.create_message(partition_session, 2)
+        mess2 = self.create_message(partition_session, 2, 2)
         await self.send_message(stream_reader, mess2)
 
         initial_buffer_size = stream_reader._buffer_size_bytes
 
         received = stream_reader.receive_batch_nowait()
         assert received == PublicBatch(
-            mess1.session_metadata,
+            session_metadata=mess1.session_metadata,
             messages=[mess1],
             _partition_session=mess1._partition_session,
             _bytes_size=self.default_batch_size,

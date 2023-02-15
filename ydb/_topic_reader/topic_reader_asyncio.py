@@ -339,7 +339,7 @@ class ReaderStream:
                     message.server_message,
                     StreamReadMessage.StartPartitionSessionRequest,
                 ):
-                    self._on_start_partition_session_start(message.server_message)
+                    self._on_start_partition_session(message.server_message)
                 elif isinstance(
                     message.server_message,
                     StreamReadMessage.StopPartitionSessionRequest,
@@ -356,7 +356,7 @@ class ReaderStream:
             self._set_first_error(e)
             raise e
 
-    def _on_start_partition_session_start(
+    def _on_start_partition_session(
         self, message: StreamReadMessage.StartPartitionSessionRequest
     ):
         try:
@@ -376,6 +376,7 @@ class ReaderStream:
                 state=PartitionSession.State.Active,
                 topic_path=message.partition_session.path,
                 partition_id=message.partition_session.partition_id,
+                start_commit_range=message.committed_offset,
             )
             self._stream.write(
                 StreamReadMessage.FromClient(
@@ -471,6 +472,11 @@ class ReaderStream:
                     _bytes_size=bytes_per_batch,
                 )
                 batches.append(batch)
+            if len(partition_data.batches) > 0:
+                last_batch = partition_data.batches[-1]
+                if len(last_batch.message_data) > 0:
+                    last_message = last_batch.message_data[-1]
+                    partition_session.start_commit_range = last_message.offset + 1
 
         batches[-1]._bytes_size += additional_bytes_to_last_batch
         return batches

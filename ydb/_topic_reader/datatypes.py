@@ -58,6 +58,7 @@ class PartitionSession:
     state: "PartitionSession.State"
     topic_path: str
     partition_id: int
+    start_commit_range: int
 
     def stop(self):
         self.state = PartitionSession.State.Stopped
