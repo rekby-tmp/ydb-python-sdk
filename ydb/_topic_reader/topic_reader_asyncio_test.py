@@ -62,7 +62,7 @@ class TestReaderStream:
             topic_path=default_reader_settings.topic,
             partition_id=4,
             state=PartitionSession.State.Active,
-            start_commit_range=10,
+            committed_offset=10,
             reader_reconnector_id=self.default_reader_reconnector_id,
             reader_stream_id=stream_reader_started._id,
         )
@@ -79,7 +79,7 @@ class TestReaderStream:
             topic_path=default_reader_settings.topic,
             partition_id=10,
             state=PartitionSession.State.Active,
-            start_commit_range=50,
+            committed_offset=50,
             reader_reconnector_id=self.default_reader_reconnector_id,
             reader_stream_id=stream_reader_started._id,
         )
@@ -148,13 +148,13 @@ class TestReaderStream:
             created_at=datetime.datetime(2023, 2, 3, 14, 15),
             message_group_id="test-message-group",
             session_metadata={},
-            offset=partition_session.start_commit_range + offset_delta-1,
+            offset=partition_session.next_message_start_commit_offset + offset_delta - 1,
             written_at=datetime.datetime(2023, 2, 3, 14, 16),
             producer_id="test-producer-id",
             data=bytes(),
             _partition_session=partition_session,
-            _commit_start_offset=partition_session.start_commit_range + offset_delta - 1,
-            _commit_end_offset=partition_session.start_commit_range+offset_delta,
+            _commit_start_offset=partition_session.next_message_start_commit_offset + offset_delta - 1,
+            _commit_end_offset=partition_session.next_message_start_commit_offset + offset_delta,
         )
 
     async def send_message(self, stream_reader, message: PublicMessage):
@@ -335,7 +335,7 @@ class TestReaderStream:
             state=PartitionSession.State.Active,
             topic_path=test_topic_path,
             partition_id=test_partition_id,
-            start_commit_range=test_partition_committed_offset,
+            committed_offset=test_partition_committed_offset,
             reader_reconnector_id=self.default_reader_reconnector_id,
             reader_stream_id=stream_reader._id,
         )
@@ -424,7 +424,7 @@ class TestReaderStream:
         session_meta = {"a": "b"}
         message_group_id = "test-message-group-id"
 
-        expected_message_offset = partition_session.start_commit_range
+        expected_message_offset = partition_session.committed_offset
 
         stream.from_server.put_nowait(
             StreamReadMessage.FromServer(
@@ -503,10 +503,10 @@ class TestReaderStream:
         message_group_id = "test-message-group-id"
         message_group_id2 = "test-message-group-id-2"
 
-        partition1_mess1_expected_offset = partition_session.start_commit_range
-        partition2_mess1_expected_offset = second_partition_session.start_commit_range
-        partition2_mess2_expected_offset = second_partition_session.start_commit_range + 1
-        partition2_mess3_expected_offset = second_partition_session.start_commit_range + 2
+        partition1_mess1_expected_offset = partition_session.committed_offset
+        partition2_mess1_expected_offset = second_partition_session.committed_offset
+        partition2_mess2_expected_offset = second_partition_session.committed_offset + 1
+        partition2_mess3_expected_offset = second_partition_session.committed_offset + 2
 
         batches = stream_reader._read_response_to_batches(
             StreamReadMessage.ReadResponse(

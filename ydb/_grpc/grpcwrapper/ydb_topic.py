@@ -70,8 +70,18 @@ class SupportedCodecs(IToProto, IFromProto, IToPublic):
 
 @dataclass
 class OffsetsRange(IFromProto):
-    start: int
-    end: int
+    """
+    half-opened interval, include [start, end) offsets
+    """
+
+    __slots__ = ('start', 'end')
+
+    start: int  # first offset
+    end: int    # offset after last, included to range
+
+    def __post_init__(self):
+        if self.end <= self.start:
+            raise ValueError("offset range must be greater then start. Got start=%s end=%s" % (self.start, self.end))
 
     @staticmethod
     def from_proto(msg: ydb_topic_pb2.OffsetsRange) -> "OffsetsRange":
@@ -80,6 +90,12 @@ class OffsetsRange(IFromProto):
             end=msg.end,
         )
 
+    def is_intersected_with(self, other: "OffsetsRange") -> bool:
+        return \
+                self.start <= other.start < self.end or \
+                self.start < other.end <= self.end or \
+                other.start <= self.start < other.end or \
+                other.start < self.end <= other.end
 
 @dataclass
 class UpdateTokenRequest(IToProto):

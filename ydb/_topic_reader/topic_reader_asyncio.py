@@ -11,8 +11,8 @@ from .. import _apis, issues, RetrySettings
 from .._utilities import AtomicCounter
 from ..aio import Driver
 from ..issues import Error as YdbError, _process_response
-from .datatypes import PartitionSession, PublicMessage, PublicBatch, ICommittable
-from .topic_reader import PublicReaderSettings, CommitResult, SessionStat
+from . import datatypes
+from . import topic_reader
 from .._topic_common.common import (
     TokenGetterFuncType,
 )
@@ -26,6 +26,15 @@ from .._errors import check_retriable_error
 
 
 class TopicReaderError(YdbError):
+    pass
+
+
+class TopicReaderCommitToExpiredPartition(TopicReaderError):
+    """
+    Commit message when partition read session are dropped.
+    It is ok - the message/batch will not commit to server and will receive in other read session
+    (with this or other reader).
+    """
     pass
 
 
@@ -44,7 +53,7 @@ class PublicAsyncIOReader:
     _closed: bool
     _reconnector: ReaderReconnector
 
-    def __init__(self, driver: Driver, settings: PublicReaderSettings):
+    def __init__(self, driver: Driver, settings: topic_reader.PublicReaderSettings):
         self._loop = asyncio.get_running_loop()
         self._closed = False
         self._reconnector = ReaderReconnector(driver, settings)
@@ -59,7 +68,7 @@ class PublicAsyncIOReader:
         if not self._closed:
             self._loop.create_task(self.close(), name="close reader")
 
-    async def sessions_stat(self) -> typing.List["SessionStat"]:
+    async def sessions_stat(self) -> typing.List["topic_reader.SessionStat"]:
         """
         Receive stat from the server
 
@@ -115,7 +124,7 @@ class PublicAsyncIOReader:
         await self._reconnector.wait_message()
         return self._reconnector.receive_batch_nowait()
 
-    async def commit_on_exit(self, mess: ICommittable) -> typing.AsyncContextManager:
+    async def commit_on_exit(self, mess: datatypes.ICommittable) -> typing.AsyncContextManager:
         """
         commit the mess match/message if exit from context manager without exceptions
 
@@ -123,7 +132,7 @@ class PublicAsyncIOReader:
         """
         raise NotImplementedError()
 
-    def commit(self, mess: ICommittable):
+    def commit(self, mess: datatypes.ICommittable):
         """
         Write commit message to a buffer.
 
@@ -133,8 +142,8 @@ class PublicAsyncIOReader:
         raise NotImplementedError()
 
     async def commit_with_ack(
-        self, mess: ICommittable
-    ) -> typing.Union[CommitResult, typing.List[CommitResult]]:
+        self, mess: datatypes.ICommittable
+    ) -> typing.Union[topic_reader.CommitResult, typing.List[topic_reader.CommitResult]]:
         """
         write commit message to a buffer and wait ack from the server.
 
@@ -162,7 +171,7 @@ class ReaderReconnector:
     _static_reader_reconnector_counter = AtomicCounter()
 
     _id: int
-    _settings: PublicReaderSettings
+    _settings: topic_reader.PublicReaderSettings
     _driver: Driver
     _background_tasks: Set[Task]
 
@@ -170,7 +179,7 @@ class ReaderReconnector:
     _stream_reader: Optional["ReaderStream"]
     _first_error: asyncio.Future[YdbError]
 
-    def __init__(self, driver: Driver, settings: PublicReaderSettings):
+    def __init__(self, driver: Driver, settings: topic_reader.PublicReaderSettings):
         self._id = self._static_reader_reconnector_counter.inc_and_get()
 
         self._settings = settings
@@ -248,15 +257,15 @@ class ReaderStream:
     _stream: Optional[IGrpcWrapperAsyncIO]
     _started: bool
     _background_tasks: Set[asyncio.Task]
-    _partition_sessions: Dict[int, PartitionSession]
+    _partition_sessions: Dict[int, datatypes.PartitionSession]
     _buffer_size_bytes: int  # use for init request, then for debug purposes only
 
     _state_changed: asyncio.Event
     _closed: bool
-    _message_batches: typing.Deque[PublicBatch]
+    _message_batches: typing.Deque[datatypes.PublicBatch]
     _first_error: asyncio.Future[YdbError]
 
-    def __init__(self, reader_reconnector_id: int, settings: PublicReaderSettings):
+    def __init__(self, reader_reconnector_id: int, settings: topic_reader.PublicReaderSettings):
         self._id = ReaderStream._static_id_counter.inc_and_get()
         self._reader_reconnector_id = reader_reconnector_id
         self._token_getter = settings._token_getter
@@ -276,7 +285,7 @@ class ReaderStream:
     async def create(
         reader_reconnector_id: int,
         driver: SupportedDriverType,
-        settings: PublicReaderSettings,
+        settings: topic_reader.PublicReaderSettings,
     ) -> "ReaderStream":
         stream = GrpcWrapperAsyncIO(StreamReadMessage.FromServer.from_proto)
 
@@ -334,7 +343,18 @@ class ReaderStream:
         except IndexError:
             return None
 
-    def commit(self, batch: ICommittable):
+    def commit(self, batch: datatypes.ICommittable):
+        partition_session = batch._commit_get_partition_session()
+
+        if partition_session.reader_reconnector_id != partition_session.reader_reconnector_id:
+            raise TopicReaderError("reader can commit only self-produced messages")
+
+        if partition_session.reader_stream_id != self._id:
+            raise TopicReaderCommitToExpiredPartition("commit messages after reconnect to server")
+
+        if partition_session.id not in self._partition_sessions:
+            raise TopicReaderCommitToExpiredPartition("commit messages after server stop the partition read session")
+
         raise NotImplementedError()
 
     async def _read_messages_loop(self, stream: IGrpcWrapperAsyncIO):
@@ -387,12 +407,12 @@ class ReaderStream:
 
             self._partition_sessions[
                 message.partition_session.partition_session_id
-            ] = PartitionSession(
+            ] = datatypes.PartitionSession(
                 id=message.partition_session.partition_session_id,
-                state=PartitionSession.State.Active,
+                state=datatypes.PartitionSession.State.Active,
                 topic_path=message.partition_session.path,
                 partition_id=message.partition_session.partition_id,
-                start_commit_range=message.committed_offset,
+                committed_offset=message.committed_offset,
                 reader_reconnector_id=self._reader_reconnector_id,
                 reader_stream_id=self._id,
             )
@@ -449,7 +469,7 @@ class ReaderStream:
 
     def _read_response_to_batches(
         self, message: StreamReadMessage.ReadResponse
-    ) -> typing.List[PublicBatch]:
+    ) -> typing.List[datatypes.PublicBatch]:
         batches = []
 
         batch_count = 0
@@ -471,7 +491,7 @@ class ReaderStream:
             for server_batch in partition_data.batches:
                 messages = []
                 for message_data in server_batch.message_data:
-                    mess = PublicMessage(
+                    mess = datatypes.PublicMessage(
                         seqno=message_data.seq_no,
                         created_at=message_data.created_at,
                         message_group_id=message_data.message_group_id,
@@ -481,25 +501,21 @@ class ReaderStream:
                         producer_id=server_batch.producer_id,
                         data=message_data.data,
                         _partition_session=partition_session,
-                        _commit_start_offset=partition_session.start_commit_range,
+                        _commit_start_offset=partition_session.next_message_start_commit_offset,
                         _commit_end_offset=message_data.offset+1
                     )
                     messages.append(mess)
 
-                    partition_session.start_commit_range = mess._commit_end_offset
+                    partition_session.next_message_start_commit_offset = mess._commit_end_offset
 
-                batch = PublicBatch(
-                    session_metadata=server_batch.write_session_meta,
-                    messages=messages,
-                    _partition_session=partition_session,
-                    _bytes_size=bytes_per_batch,
-                )
-                batches.append(batch)
-            if len(partition_data.batches) > 0:
-                last_batch = partition_data.batches[-1]
-                if len(last_batch.message_data) > 0:
-                    last_message = last_batch.message_data[-1]
-                    partition_session.start_commit_range = last_message.offset + 1
+                if len(messages) > 0:
+                    batch = datatypes.PublicBatch(
+                        session_metadata=server_batch.write_session_meta,
+                        messages=messages,
+                        _partition_session=partition_session,
+                        _bytes_size=bytes_per_batch,
+                    )
+                    batches.append(batch)
 
         batches[-1]._bytes_size += additional_bytes_to_last_batch
         return batches
