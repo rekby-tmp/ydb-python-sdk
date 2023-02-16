@@ -8,6 +8,7 @@ from typing import Optional, Set, Dict
 
 
 from .. import _apis, issues, RetrySettings
+from .._utilities import AtomicCounter
 from ..aio import Driver
 from ..issues import Error as YdbError, _process_response
 from .datatypes import PartitionSession, PublicMessage, PublicBatch, ICommittable
@@ -158,6 +159,9 @@ class PublicAsyncIOReader:
 
 
 class ReaderReconnector:
+    _static_reader_reconnector_counter = AtomicCounter()
+
+    _id: int
     _settings: PublicReaderSettings
     _driver: Driver
     _background_tasks: Set[Task]
@@ -167,6 +171,8 @@ class ReaderReconnector:
     _first_error: asyncio.Future[YdbError]
 
     def __init__(self, driver: Driver, settings: PublicReaderSettings):
+        self._id = self._static_reader_reconnector_counter.inc_and_get()
+
         self._settings = settings
         self._driver = driver
         self._background_tasks = set()
@@ -182,7 +188,7 @@ class ReaderReconnector:
         while True:
             try:
                 self._stream_reader = await ReaderStream.create(
-                    self._driver, self._settings
+                    self._id, self._driver, self._settings
                 )
                 attempt = 0
                 self._state_changed.set()
@@ -233,6 +239,10 @@ class ReaderReconnector:
 
 
 class ReaderStream:
+    _static_id_counter = AtomicCounter()
+
+    _id: int
+    _reader_reconnector_id: int
     _token_getter: Optional[TokenGetterFuncType]
     _session_id: str
     _stream: Optional[IGrpcWrapperAsyncIO]
@@ -246,7 +256,9 @@ class ReaderStream:
     _message_batches: typing.Deque[PublicBatch]
     _first_error: asyncio.Future[YdbError]
 
-    def __init__(self, settings: PublicReaderSettings):
+    def __init__(self, reader_reconnector_id: int, settings: PublicReaderSettings):
+        self._id = ReaderStream._static_id_counter.inc_and_get()
+        self._reader_reconnector_id = reader_reconnector_id
         self._token_getter = settings._token_getter
         self._session_id = "not initialized"
         self._stream = None
@@ -262,6 +274,7 @@ class ReaderStream:
 
     @staticmethod
     async def create(
+        reader_reconnector_id: int,
         driver: SupportedDriverType,
         settings: PublicReaderSettings,
     ) -> "ReaderStream":
@@ -271,7 +284,7 @@ class ReaderStream:
             driver, _apis.TopicService.Stub, _apis.TopicService.StreamRead
         )
 
-        reader = ReaderStream(settings)
+        reader = ReaderStream(reader_reconnector_id, settings)
         await reader._start(stream, settings._init_message())
         return reader
 
@@ -320,6 +333,9 @@ class ReaderStream:
             return batch
         except IndexError:
             return None
+
+    def commit(self, batch: ICommittable):
+        raise NotImplementedError()
 
     async def _read_messages_loop(self, stream: IGrpcWrapperAsyncIO):
         try:
@@ -377,6 +393,8 @@ class ReaderStream:
                 topic_path=message.partition_session.path,
                 partition_id=message.partition_session.partition_id,
                 start_commit_range=message.committed_offset,
+                reader_reconnector_id=self._reader_reconnector_id,
+                reader_stream_id=self._id,
             )
             self._stream.write(
                 StreamReadMessage.FromClient(
@@ -463,8 +481,13 @@ class ReaderStream:
                         producer_id=server_batch.producer_id,
                         data=message_data.data,
                         _partition_session=partition_session,
+                        _commit_start_offset=partition_session.start_commit_range,
+                        _commit_end_offset=message_data.offset+1
                     )
                     messages.append(mess)
+
+                    partition_session.start_commit_range = mess._commit_end_offset
+
                 batch = PublicBatch(
                     session_metadata=server_batch.write_session_meta,
                     messages=messages,

@@ -6,6 +6,11 @@ from typing import Mapping, Union, Any, List, Dict
 
 
 class ICommittable(abc.ABC):
+    # @property
+    # @abc.abstractmethod
+    # def _partition_session(self) -> "PartitionSession":
+    #     pass
+
     @property
     @abc.abstractmethod
     def start_offset(self) -> int:
@@ -37,6 +42,8 @@ class PublicMessage(ICommittable, ISessionAlive):
         bytes, Any
     ]  # set as original decompressed bytes or deserialized object if deserializer set in reader
     _partition_session: "PartitionSession"
+    _commit_start_offset: int
+    _commit_end_offset: int
 
     @property
     def start_offset(self) -> int:
@@ -59,6 +66,8 @@ class PartitionSession:
     topic_path: str
     partition_id: int
     start_commit_range: int
+    reader_reconnector_id: int
+    reader_stream_id: int
 
     def stop(self):
         self.state = PartitionSession.State.Stopped
@@ -78,11 +87,11 @@ class PublicBatch(ICommittable, ISessionAlive):
 
     @property
     def start_offset(self) -> int:
-        raise NotImplementedError()
+        return self.messages[0]._commit_start_offset
 
     @property
     def end_offset(self) -> int:
-        raise NotImplementedError()
+        return self.messages[-1]._commit_end_offset
 
     # ISessionAlive implementation
     @property

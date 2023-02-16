@@ -49,19 +49,22 @@ class TestReaderStream:
     default_batch_size = 1
     partition_session_id = 2
     second_partition_session_id = 12
+    default_reader_reconnector_id = 4
 
     @pytest.fixture()
     def stream(self):
         return StreamMock()
 
     @pytest.fixture()
-    async def partition_session(self, default_reader_settings, stream_reader_started: ReaderStream):
+    def partition_session(self, default_reader_settings, stream_reader_started: ReaderStream) -> PartitionSession:
         partition_session = PartitionSession(
             id=2,
             topic_path=default_reader_settings.topic,
             partition_id=4,
             state=PartitionSession.State.Active,
             start_commit_range=10,
+            reader_reconnector_id=self.default_reader_reconnector_id,
+            reader_stream_id=stream_reader_started._id,
         )
 
         assert partition_session.id not in stream_reader_started._partition_sessions
@@ -77,6 +80,8 @@ class TestReaderStream:
             partition_id=10,
             state=PartitionSession.State.Active,
             start_commit_range=50,
+            reader_reconnector_id=self.default_reader_reconnector_id,
+            reader_stream_id=stream_reader_started._id,
         )
 
         assert partition_session.id not in stream_reader_started._partition_sessions
@@ -91,7 +96,7 @@ class TestReaderStream:
         stream,
         default_reader_settings,
     ) -> ReaderStream:
-        reader = ReaderStream(default_reader_settings)
+        reader = ReaderStream(self.default_reader_reconnector_id, default_reader_settings)
         init_message = object()
 
         # noinspection PyTypeChecker
@@ -143,11 +148,13 @@ class TestReaderStream:
             created_at=datetime.datetime(2023, 2, 3, 14, 15),
             message_group_id="test-message-group",
             session_metadata={},
-            offset=partition_session.start_commit_range + offset_delta,
+            offset=partition_session.start_commit_range + offset_delta-1,
             written_at=datetime.datetime(2023, 2, 3, 14, 16),
             producer_id="test-producer-id",
             data=bytes(),
             _partition_session=partition_session,
+            _commit_start_offset=partition_session.start_commit_range + offset_delta - 1,
+            _commit_end_offset=partition_session.start_commit_range+offset_delta,
         )
 
     async def send_message(self, stream_reader, message: PublicMessage):
@@ -203,6 +210,22 @@ class TestReaderStream:
         with pytest.raises(TestError):
             stream_reader_finish_with_error.receive_batch_nowait()
 
+    async def test_commit_ranges_for_received_messages(self, stream, stream_reader_started: ReaderStream, partition_session):
+        m1 = self.create_message(partition_session, 1, 1)
+        m2 = self.create_message(partition_session, 2, 10)
+        m2._commit_start_offset = m1.offset+1
+
+        await self.send_message(stream_reader_started, m1)
+        await self.send_message(stream_reader_started, m2)
+
+        await stream_reader_started.wait_messages()
+        received = stream_reader_started.receive_batch_nowait().messages
+        assert received == [m1]
+
+        await stream_reader_started.wait_messages()
+        received = stream_reader_started.receive_batch_nowait().messages
+        assert received == [m2]
+
     async def test_error_from_status_code(
         self, stream, stream_reader_finish_with_error
     ):
@@ -224,7 +247,7 @@ class TestReaderStream:
             stream_reader_finish_with_error.receive_batch_nowait()
 
     async def test_init_reader(self, stream, default_reader_settings):
-        reader = ReaderStream(default_reader_settings)
+        reader = ReaderStream(self.default_reader_reconnector_id, default_reader_settings)
         init_message = StreamReadMessage.InitRequest(
             consumer="test-consumer",
             topics_read_settings=[
@@ -313,6 +336,8 @@ class TestReaderStream:
             topic_path=test_topic_path,
             partition_id=test_partition_id,
             start_commit_range=test_partition_committed_offset,
+            reader_reconnector_id=self.default_reader_reconnector_id,
+            reader_stream_id=stream_reader._id,
         )
 
     async def test_partition_stop_force(self, stream, stream_reader, partition_session):
@@ -383,7 +408,7 @@ class TestReaderStream:
             stream.from_client.get_nowait()
 
     async def test_receive_message_from_server(
-        self, stream_reader, stream, partition_session, second_partition_session
+        self, stream_reader, stream, partition_session: PartitionSession, second_partition_session
     ):
         def reader_batch_count():
             return len(stream_reader._message_batches)
@@ -399,6 +424,8 @@ class TestReaderStream:
         session_meta = {"a": "b"}
         message_group_id = "test-message-group-id"
 
+        expected_message_offset = partition_session.start_commit_range
+
         stream.from_server.put_nowait(
             StreamReadMessage.FromServer(
                 server_status=ServerStatus(ydb_status_codes_pb2.StatusIds.SUCCESS, []),
@@ -411,7 +438,7 @@ class TestReaderStream:
                                 StreamReadMessage.ReadResponse.Batch(
                                     message_data=[
                                         StreamReadMessage.ReadResponse.MessageData(
-                                            offset=1,
+                                            offset=expected_message_offset,
                                             seq_no=2,
                                             created_at=created_at,
                                             data=data,
@@ -444,11 +471,13 @@ class TestReaderStream:
                     created_at=created_at,
                     message_group_id=message_group_id,
                     session_metadata=session_meta,
-                    offset=1,
+                    offset=expected_message_offset,
                     written_at=written_at,
                     producer_id=producer_id,
                     data=data,
                     _partition_session=partition_session,
+                    _commit_start_offset=expected_message_offset,
+                    _commit_end_offset=expected_message_offset+1,
                 )
             ],
             _partition_session=partition_session,
@@ -474,6 +503,11 @@ class TestReaderStream:
         message_group_id = "test-message-group-id"
         message_group_id2 = "test-message-group-id-2"
 
+        partition1_mess1_expected_offset = partition_session.start_commit_range
+        partition2_mess1_expected_offset = second_partition_session.start_commit_range
+        partition2_mess2_expected_offset = second_partition_session.start_commit_range + 1
+        partition2_mess3_expected_offset = second_partition_session.start_commit_range + 2
+
         batches = stream_reader._read_response_to_batches(
             StreamReadMessage.ReadResponse(
                 bytes_size=3,
@@ -484,7 +518,7 @@ class TestReaderStream:
                             StreamReadMessage.ReadResponse.Batch(
                                 message_data=[
                                     StreamReadMessage.ReadResponse.MessageData(
-                                        offset=2,
+                                        offset=partition1_mess1_expected_offset,
                                         seq_no=3,
                                         created_at=created_at,
                                         data=data,
@@ -505,7 +539,7 @@ class TestReaderStream:
                             StreamReadMessage.ReadResponse.Batch(
                                 message_data=[
                                     StreamReadMessage.ReadResponse.MessageData(
-                                        offset=1,
+                                        offset=partition2_mess1_expected_offset,
                                         seq_no=2,
                                         created_at=created_at2,
                                         data=data,
@@ -521,7 +555,7 @@ class TestReaderStream:
                             StreamReadMessage.ReadResponse.Batch(
                                 message_data=[
                                     StreamReadMessage.ReadResponse.MessageData(
-                                        offset=2,
+                                        offset=partition2_mess2_expected_offset,
                                         seq_no=3,
                                         created_at=created_at3,
                                         data=data2,
@@ -529,7 +563,7 @@ class TestReaderStream:
                                         message_group_id=message_group_id,
                                     ),
                                     StreamReadMessage.ReadResponse.MessageData(
-                                        offset=4,
+                                        offset=partition2_mess3_expected_offset,
                                         seq_no=5,
                                         created_at=created_at4,
                                         data=data,
@@ -560,11 +594,13 @@ class TestReaderStream:
                     created_at=created_at,
                     message_group_id=message_group_id,
                     session_metadata=session_meta,
-                    offset=2,
+                    offset=partition1_mess1_expected_offset,
                     written_at=written_at,
                     producer_id=producer_id,
                     data=data,
                     _partition_session=partition_session,
+                    _commit_start_offset=partition1_mess1_expected_offset,
+                    _commit_end_offset=partition1_mess1_expected_offset+1,
                 )
             ],
             _partition_session=partition_session,
@@ -578,11 +614,13 @@ class TestReaderStream:
                     created_at=created_at2,
                     message_group_id=message_group_id,
                     session_metadata=session_meta,
-                    offset=1,
+                    offset=partition2_mess1_expected_offset,
                     written_at=written_at2,
                     producer_id=producer_id,
                     data=data,
                     _partition_session=second_partition_session,
+                    _commit_start_offset=partition2_mess1_expected_offset,
+                    _commit_end_offset=partition2_mess1_expected_offset+1,
                 )
             ],
             _partition_session=second_partition_session,
@@ -596,22 +634,26 @@ class TestReaderStream:
                     created_at=created_at3,
                     message_group_id=message_group_id,
                     session_metadata=session_meta2,
-                    offset=2,
+                    offset=partition2_mess2_expected_offset,
                     written_at=written_at2,
                     producer_id=producer_id2,
                     data=data2,
                     _partition_session=second_partition_session,
+                    _commit_start_offset=partition2_mess2_expected_offset,
+                    _commit_end_offset=partition2_mess2_expected_offset+1,
                 ),
                 PublicMessage(
                     seqno=5,
                     created_at=created_at4,
                     message_group_id=message_group_id2,
                     session_metadata=session_meta2,
-                    offset=4,
+                    offset=partition2_mess3_expected_offset,
                     written_at=written_at2,
                     producer_id=producer_id,
                     data=data,
                     _partition_session=second_partition_session,
+                    _commit_start_offset=partition2_mess3_expected_offset,
+                    _commit_end_offset=partition2_mess3_expected_offset + 1,
                 ),
             ],
             _partition_session=second_partition_session,
@@ -624,7 +666,7 @@ class TestReaderStream:
         mess1 = self.create_message(partition_session, 1, 1)
         await self.send_message(stream_reader, mess1)
 
-        mess2 = self.create_message(partition_session, 2, 2)
+        mess2 = self.create_message(partition_session, 2, 1)
         await self.send_message(stream_reader, mess2)
 
         initial_buffer_size = stream_reader._buffer_size_bytes
@@ -690,6 +732,7 @@ class TestReaderReconnector:
         stream_index = 0
 
         async def stream_create(
+            reader_reconnector_id: int,
             driver: SupportedDriverType,
             settings: PublicReaderSettings,
         ):
@@ -704,7 +747,7 @@ class TestReaderReconnector:
 
         with mock.patch.object(ReaderStream, "create", stream_create):
             reconnector = ReaderReconnector(mock.Mock(), PublicReaderSettings("", ""))
-            await reconnector.wait_message()
+            await wait_for_fast(reconnector.wait_message())
 
         reader_stream_mock_with_error.wait_error.assert_any_await()
         reader_stream_mock_with_error.wait_messages.assert_any_await()
