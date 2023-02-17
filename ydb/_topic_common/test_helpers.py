@@ -23,7 +23,18 @@ class StreamMock(IGrpcWrapperAsyncIO):
         self.from_client.put_nowait(wrap_message)
 
 
-async def wait_condition(f: typing.Callable[[], bool], timeout=1):
+class WaitConditionException(Exception):
+    pass
+
+
+async def wait_condition(f: typing.Callable[[], bool], timeout: typing.Optional[typing.Union[float, int]] = None):
+    """
+    timeout default is 1 second
+    if timeout is 0 - only counter work. It userful if test need fast timeout for condition (without wait full timeout)
+    """
+    if timeout is None:
+        timeout = 1
+
     start = time.monotonic()
     counter = 0
     while (time.monotonic() - start < timeout) or counter < 1000:
@@ -32,8 +43,10 @@ async def wait_condition(f: typing.Callable[[], bool], timeout=1):
             return
         await asyncio.sleep(0)
 
-    raise Exception("Bad condition in test")
+    raise WaitConditionException("Bad condition in test")
 
 
-async def wait_for_fast(fut):
-    return await asyncio.wait_for(fut, 1)
+async def wait_for_fast(awaitable: typing.Awaitable, timeout: typing.Optional[typing.Union[float, int]] = None):
+    fut = asyncio.ensure_future(awaitable)
+    await wait_condition(lambda: fut.done(), timeout)
+    return fut.result()

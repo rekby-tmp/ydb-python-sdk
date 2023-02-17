@@ -68,7 +68,7 @@ class SupportedCodecs(IToProto, IFromProto, IToPublic):
         return list(map(Codec.to_public, self.codecs))
 
 
-@dataclass
+@dataclass(order=True)
 class OffsetsRange(IFromProto):
     """
     half-opened interval, include [start, end) offsets
@@ -80,8 +80,8 @@ class OffsetsRange(IFromProto):
     end: int    # offset after last, included to range
 
     def __post_init__(self):
-        if self.end <= self.start:
-            raise ValueError("offset range must be greater then start. Got start=%s end=%s" % (self.start, self.end))
+        if self.end < self.start:
+            raise ValueError("offset end must be not less then start. Got start=%s end=%s" % (self.start, self.end))
 
     @staticmethod
     def from_proto(msg: ydb_topic_pb2.OffsetsRange) -> "OffsetsRange":
@@ -544,13 +544,28 @@ class StreamReadMessage:
                 )
 
     @dataclass
-    class CommitOffsetRequest:
+    class CommitOffsetRequest(IToProto):
         commit_offsets: List["PartitionCommitOffset"]
 
+        def to_proto(self) -> ydb_topic_pb2.StreamReadMessage.CommitOffsetRequest:
+            res = ydb_topic_pb2.StreamReadMessage.CommitOffsetRequest(
+                commit_offsets=list(
+                    map(StreamReadMessage.CommitOffsetRequest.PartitionCommitOffset.to_proto, self.commit_offsets)
+                ),
+            )
+            return res
+
         @dataclass
-        class PartitionCommitOffset:
+        class PartitionCommitOffset(IToProto):
             partition_session_id: int
             offsets: List["OffsetsRange"]
+
+            def to_proto(self) -> ydb_topic_pb2.StreamReadMessage.CommitOffsetRequest.PartitionCommitOffset:
+                res = ydb_topic_pb2.StreamReadMessage.CommitOffsetRequest.PartitionCommitOffset(
+                    partition_session_id=self.partition_session_id,
+                    offsets=map(OffsetsRange.from_proto, self.offsets),
+                )
+                return res
 
     @dataclass
     class CommitOffsetResponse:

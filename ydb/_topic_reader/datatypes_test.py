@@ -1,3 +1,6 @@
+import asyncio
+import bisect
+import copy
 from collections import deque
 from dataclasses import dataclass, field
 from typing import List, Optional, Type, TypeVar, Union
@@ -22,6 +25,11 @@ class TestPartitionSession:
             reader_reconnector_id=1,
             reader_stream_id=1,
         )
+
+    def test_add_commit(self, session):
+        commit = OffsetsRange(self.session_comitted_offset, self.session_comitted_offset+5)
+        waiter = session.add_commit(commit)
+        assert waiter.end_offset == commit.end
 
     @pytest.mark.parametrize(
         "original,add,result",
@@ -54,7 +62,7 @@ class TestPartitionSession:
             (
                 [OffsetsRange(1, 2), OffsetsRange(3, 4)],
                 OffsetsRange(2, 3),
-                [OffsetsRange(1, 3), OffsetsRange(3, 4)],
+                [OffsetsRange(1, 2), OffsetsRange(2, 4)],
             ),
             (
                 [OffsetsRange(1, 10)],
@@ -63,19 +71,99 @@ class TestPartitionSession:
             ),
         ]
     )
-    def test_add_commit(self,
+    def test_add_to_commits(self,
                         session,
                         original: List[OffsetsRange],
                         add: OffsetsRange,
                         result: Union[List[OffsetsRange], Type[Exception]],
                         ):
-        session.commits = original
+        session._commits = copy.deepcopy(original)
         if isinstance(result, type) and issubclass(result, Exception):
             with pytest.raises(result):
-                session.add_commit(add)
+                session._add_to_commits(add)
         else:
-            session.add_commit(add)
-            assert session.commits == result
+            session._add_to_commits(add)
+            assert session._commits == result
+
+    # noinspection PyTypeChecker
+    @pytest.mark.parametrize(
+        "original,add,result",
+        [
+            (
+                [],
+                5,
+                [PartitionSession.CommitAckWaiter(5, None)],
+            ),
+            (
+                [PartitionSession.CommitAckWaiter(5, None)],
+                6,
+                [PartitionSession.CommitAckWaiter(5, None), PartitionSession.CommitAckWaiter(6, None)],
+            ),
+            (
+                [PartitionSession.CommitAckWaiter(5, None)],
+                4,
+                [PartitionSession.CommitAckWaiter(4, None), PartitionSession.CommitAckWaiter(5, None)],
+            ),
+            (
+                [PartitionSession.CommitAckWaiter(5, None)],
+                0,
+                [PartitionSession.CommitAckWaiter(0, None), PartitionSession.CommitAckWaiter(5, None)],
+            ),
+            (
+                [PartitionSession.CommitAckWaiter(5, None)],
+                100,
+                [PartitionSession.CommitAckWaiter(5, None), PartitionSession.CommitAckWaiter(100, None)],
+            ),
+            (
+                [PartitionSession.CommitAckWaiter(5, None), PartitionSession.CommitAckWaiter(100, None)],
+                50,
+                [
+                    PartitionSession.CommitAckWaiter(5, None),
+                    PartitionSession.CommitAckWaiter(50, None),
+                    PartitionSession.CommitAckWaiter(100, None),
+                ],
+            ),
+            (
+                [PartitionSession.CommitAckWaiter(5, None), PartitionSession.CommitAckWaiter(7, None)],
+                6,
+                [
+                    PartitionSession.CommitAckWaiter(5, None),
+                    PartitionSession.CommitAckWaiter(6, None),
+                    PartitionSession.CommitAckWaiter(7, None),
+                ],
+            ),
+            (
+                    [PartitionSession.CommitAckWaiter(5, None), PartitionSession.CommitAckWaiter(100, None)],
+                    6,
+                    [
+                        PartitionSession.CommitAckWaiter(5, None),
+                        PartitionSession.CommitAckWaiter(6, None),
+                        PartitionSession.CommitAckWaiter(100, None),
+                    ],
+            ),
+            (
+                    [PartitionSession.CommitAckWaiter(5, None), PartitionSession.CommitAckWaiter(100, None)],
+                    99,
+                    [
+                        PartitionSession.CommitAckWaiter(5, None),
+                        PartitionSession.CommitAckWaiter(99, None),
+                        PartitionSession.CommitAckWaiter(100, None),
+                    ],
+            ),
+        ]
+    )
+    def test_add_waiter(self,
+                        session,
+                        original: List[PartitionSession.CommitAckWaiter],
+                        add: int,
+                        result: List[PartitionSession.CommitAckWaiter],
+                        ):
+        session._ack_waiters = copy.deepcopy(original)
+        res = session._add_waiter(add)
+        assert result == session._ack_waiters
+
+        index = bisect.bisect_left(session._ack_waiters, res)
+        assert res is session._ack_waiters[index]
 
     @pytest.mark.parametrize(
         "commits,result,rest",
@@ -120,16 +208,16 @@ class TestPartitionSession:
                               result: Optional[OffsetsRange],
                               rest: List[OffsetsRange],
                               ):
-        send_commit_window_start = session.send_commit_window_start
+        send_commit_window_start = session._send_commit_window_start
 
-        session.commits = deque(commits)
+        session._commits = deque(commits)
         res = session.pop_commit_range()
         assert res == result
-        assert session.commits == deque(rest)
+        assert session._commits == deque(rest)
 
         if res is None:
-            assert session.send_commit_window_start == send_commit_window_start
+            assert session._send_commit_window_start == send_commit_window_start
         else:
-            assert session.send_commit_window_start != send_commit_window_start
-            assert session.send_commit_window_start == res.end
+            assert session._send_commit_window_start != send_commit_window_start
+            assert session._send_commit_window_start == res.end
 

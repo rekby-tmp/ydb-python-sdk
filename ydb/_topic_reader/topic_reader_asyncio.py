@@ -8,6 +8,7 @@ from typing import Optional, Set, Dict
 
 
 from .. import _apis, issues, RetrySettings
+from .._grpc.grpcwrapper import ydb_topic
 from .._utilities import AtomicCounter
 from ..aio import Driver
 from ..issues import Error as YdbError, _process_response
@@ -343,7 +344,7 @@ class ReaderStream:
         except IndexError:
             return None
 
-    def commit(self, batch: datatypes.ICommittable):
+    def commit(self, batch: datatypes.ICommittable) -> datatypes.PartitionSession.CommitAckWaiter:
         partition_session = batch._commit_get_partition_session()
 
         if partition_session.reader_reconnector_id != partition_session.reader_reconnector_id:
@@ -355,7 +356,19 @@ class ReaderStream:
         if partition_session.id not in self._partition_sessions:
             raise TopicReaderCommitToExpiredPartition("commit messages after server stop the partition read session")
 
-        raise NotImplementedError()
+        waiter = partition_session.add_commit(batch._commit_get_offsets_range())
+
+        send_range = partition_session.pop_commit_range()
+        if send_range:
+            client_message = StreamReadMessage.CommitOffsetRequest(
+                commit_offsets=[StreamReadMessage.CommitOffsetRequest.PartitionCommitOffset(
+                    partition_session_id=partition_session.id,
+                    offsets=[send_range],
+                )]
+            )
+            self._stream.write(StreamReadMessage.FromClient(client_message=client_message))
+
+        return waiter
 
     async def _read_messages_loop(self, stream: IGrpcWrapperAsyncIO):
         try:
@@ -501,12 +514,12 @@ class ReaderStream:
                         producer_id=server_batch.producer_id,
                         data=message_data.data,
                         _partition_session=partition_session,
-                        _commit_start_offset=partition_session.next_message_start_commit_offset,
+                        _commit_start_offset=partition_session._next_message_start_commit_offset,
                         _commit_end_offset=message_data.offset+1
                     )
                     messages.append(mess)
 
-                    partition_session.next_message_start_commit_offset = mess._commit_end_offset
+                    partition_session._next_message_start_commit_offset = mess._commit_end_offset
 
                 if len(messages) > 0:
                     batch = datatypes.PublicBatch(

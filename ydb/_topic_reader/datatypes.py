@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import abc
+import asyncio
+import bisect
 import enum
 from collections import deque
 from dataclasses import dataclass, field
 import datetime
-from typing import Mapping, Union, Any, List, Dict, Deque, Optional
+from typing import Mapping, Union, Any, List, Dict, Deque, Optional, NamedTuple
 
 from ydb._grpc.grpcwrapper.ydb_topic import OffsetsRange
-from . import topic_reader_asyncio
 
 
 class ICommittable(abc.ABC):
@@ -17,11 +18,7 @@ class ICommittable(abc.ABC):
         ...
 
     @abc.abstractmethod
-    def _commit_get_start_offset(self) -> int:
-        ...
-
-    @abc.abstractmethod
-    def _commit_get_end_offset(self) -> int:
+    def _commit_get_offsets_range(self) -> OffsetsRange:
         ...
 
 
@@ -51,13 +48,8 @@ class PublicMessage(ICommittable, ISessionAlive):
     def _commit_get_partition_session(self) -> PartitionSession:
         return self._partition_session
 
-    @property
-    def _commit_get_start_offset(self) -> int:
-        return self._commit_start_offset
-
-    @property
-    def _commit_get_end_offset(self) -> int:
-        return self._commit_end_offset
+    def _commit_get_offsets_range(self) -> OffsetsRange:
+        return OffsetsRange(self._commit_start_offset, self._commit_end_offset)
 
     # ISessionAlive implementation
     @property
@@ -74,48 +66,69 @@ class PartitionSession:
     committed_offset: int  # last commit offset, acked from server. Processed messages up to the field-1 offset.
     reader_reconnector_id: int
     reader_stream_id: int
-    next_message_start_commit_offset: int = field(init=False)
-    send_commit_window_start: int = field(init=False)
-    commits: Deque[OffsetsRange] = field(init=False, default_factory=lambda: deque())
+    _next_message_start_commit_offset: int = field(init=False)
+    _send_commit_window_start: int = field(init=False)
+    _commits: Deque[OffsetsRange] = field(init=False, default_factory=lambda: deque())
+    _ack_waiters: Deque["PartitionSession.CommitAckWaiter"] = field(init=False, default_factory=lambda: deque())
+    _loop: Optional[asyncio.AbstractEventLoop] = field(init=False)  # may be None in tests
 
     def __post_init__(self):
-        self.next_message_start_commit_offset = self.committed_offset
-        self.send_commit_window_start = self.committed_offset
+        self._next_message_start_commit_offset = self.committed_offset
+        self._send_commit_window_start = self.committed_offset
+
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._loop = None
 
     def stop(self):
         self.state = PartitionSession.State.Stopped
 
-    def add_commit(self, new_commit: OffsetsRange):
-        for commit in self.commits:
-            if commit.is_intersected_with(new_commit):
-                raise ValueError("the range")
+    def add_commit(self, new_commit: OffsetsRange) -> "PartitionSession.CommitAckWaiter":
+        self._add_to_commits(new_commit)
+        return self._add_waiter(new_commit.end)
 
-        for index, commit in enumerate(self.commits):
-            if new_commit.start == commit.end:
-                commit.end = new_commit.end
-                return
-            if new_commit.end == commit.start:
-                commit.start = new_commit.start
-                return
-            if new_commit.start < commit.start:
-                self.commits.insert(index, new_commit)
-                return
+    def _add_to_commits(self, new_commit: OffsetsRange):
+        index = bisect.bisect_left(self._commits, new_commit)
 
-        self.commits.append(new_commit)
+        prev_commit = self._commits[index - 1] if index > 0 else None
+        commit = self._commits[index] if index < len(self._commits) else None
+
+        for c in (prev_commit, commit):
+            if c is not None and new_commit.is_intersected_with(c):
+                raise ValueError("new commit intersected with existed. New range: %s, existed: %s" % (new_commit, c))
+
+        if commit is not None and commit.start == new_commit.end:
+            commit.start = new_commit.start
+        elif prev_commit is not None and prev_commit.end == new_commit.start:
+            prev_commit.end = new_commit.end
+        else:
+            self._commits.insert(index, new_commit)
+
+    def _add_waiter(self, end_offset: int) -> "PartitionSession.CommitAckWaiter":
+        waiter = PartitionSession.CommitAckWaiter(end_offset, self._create_future())
+        bisect.insort(self._ack_waiters, waiter)
+        return waiter
+
+    def _create_future(self) -> asyncio.Future:
+        if self._loop:
+            return self._loop.create_future()
+        else:
+            return asyncio.Future()
 
     def pop_commit_range(self) -> Optional[OffsetsRange]:
-        if len(self.commits) == 0:
+        if len(self._commits) == 0:
             return None
 
-        if self.commits[0].start != self.send_commit_window_start:
+        if self._commits[0].start != self._send_commit_window_start:
             return None
 
-        res = self.commits.popleft()
-        while len(self.commits) > 0 and self.commits[0].start == res.end:
-            commit = self.commits.popleft()
+        res = self._commits.popleft()
+        while len(self._commits) > 0 and self._commits[0].start == res.end:
+            commit = self._commits.popleft()
             res.end = commit.end
 
-        self.send_commit_window_start = res.end
+        self._send_commit_window_start = res.end
 
         return res
 
@@ -123,6 +136,11 @@ class PartitionSession:
         Active = 1
         GracefulShutdown = 2
         Stopped = 3
+
+    @dataclass(order=True)
+    class CommitAckWaiter:
+        end_offset: int
+        future: asyncio.Future = field(compare=False)
 
 
 @dataclass
@@ -135,17 +153,17 @@ class PublicBatch(ICommittable, ISessionAlive):
     def _commit_get_partition_session(self) -> PartitionSession:
         return self.messages[0]._commit_get_partition_session()
 
-    def _commit_get_start_offset(self) -> int:
-        return self.messages[0]._commit_get_start_offset()
-
-    def _commit_get_end_offset(self) -> int:
-        return self.messages[-1]._commit_get_end_offset()
+    def _commit_get_offsets_range(self) -> OffsetsRange:
+        return OffsetsRange(
+            self.messages[0]._commit_get_offsets_range().start,
+            self.messages[-1]._commit_get_offsets_range().end,
+        )
 
     # ISessionAlive implementation
     @property
     def is_alive(self) -> bool:
         state = self._partition_session.state
         return (
-            state == PartitionSession.State.Active
-            or state == PartitionSession.State.GracefulShutdown
+                state == PartitionSession.State.Active
+                or state == PartitionSession.State.GracefulShutdown
         )
