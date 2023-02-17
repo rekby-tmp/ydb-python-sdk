@@ -68,7 +68,11 @@ class PartitionSession:
     reader_stream_id: int
     _next_message_start_commit_offset: int = field(init=False)
     _send_commit_window_start: int = field(init=False)
+
+    # todo: check if deque is optimal
     _pending_commits: Deque[OffsetsRange] = field(init=False, default_factory=lambda: deque())
+
+    # todo: check if deque is optimal
     _ack_waiters: Deque["PartitionSession.CommitAckWaiter"] = field(init=False, default_factory=lambda: deque())
     _loop: Optional[asyncio.AbstractEventLoop] = field(init=False)  # may be None in tests
 
@@ -107,7 +111,13 @@ class PartitionSession:
 
     def _add_waiter(self, end_offset: int) -> "PartitionSession.CommitAckWaiter":
         waiter = PartitionSession.CommitAckWaiter(end_offset, self._create_future())
-        bisect.insort(self._ack_waiters, waiter)
+
+        # fast way
+        if len(self._ack_waiters) > 0 and self._ack_waiters[-1].end_offset < end_offset:
+            self._ack_waiters.append(waiter)
+        else:
+            bisect.insort(self._ack_waiters, waiter)
+
         return waiter
 
     def _create_future(self) -> asyncio.Future:
