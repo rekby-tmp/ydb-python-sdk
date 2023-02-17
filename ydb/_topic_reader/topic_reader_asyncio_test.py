@@ -288,7 +288,7 @@ class TestReaderStream:
             def _commit_get_offsets_range(self) -> OffsetsRange:
                 return OffsetsRange(self.start, self.end)
 
-        partition_session._commits = deque(pending_ranges)
+        partition_session._pending_commits = deque(pending_ranges)
 
         stream_reader.commit(Commitable(commit.start, commit.end))
 
@@ -307,7 +307,7 @@ class TestReaderStream:
             with pytest.raises(test_helpers.WaitConditionException):
                 await wait_message()
 
-        assert partition_session._commits == deque(rest_ranges)
+        assert partition_session._pending_commits == deque(rest_ranges)
 
     async def test_commit_ack_received(self):
         raise NotImplementedError()

@@ -68,7 +68,7 @@ class PartitionSession:
     reader_stream_id: int
     _next_message_start_commit_offset: int = field(init=False)
     _send_commit_window_start: int = field(init=False)
-    _commits: Deque[OffsetsRange] = field(init=False, default_factory=lambda: deque())
+    _pending_commits: Deque[OffsetsRange] = field(init=False, default_factory=lambda: deque())
     _ack_waiters: Deque["PartitionSession.CommitAckWaiter"] = field(init=False, default_factory=lambda: deque())
     _loop: Optional[asyncio.AbstractEventLoop] = field(init=False)  # may be None in tests
 
@@ -89,10 +89,10 @@ class PartitionSession:
         return self._add_waiter(new_commit.end)
 
     def _add_to_commits(self, new_commit: OffsetsRange):
-        index = bisect.bisect_left(self._commits, new_commit)
+        index = bisect.bisect_left(self._pending_commits, new_commit)
 
-        prev_commit = self._commits[index - 1] if index > 0 else None
-        commit = self._commits[index] if index < len(self._commits) else None
+        prev_commit = self._pending_commits[index - 1] if index > 0 else None
+        commit = self._pending_commits[index] if index < len(self._pending_commits) else None
 
         for c in (prev_commit, commit):
             if c is not None and new_commit.is_intersected_with(c):
@@ -103,7 +103,7 @@ class PartitionSession:
         elif prev_commit is not None and prev_commit.end == new_commit.start:
             prev_commit.end = new_commit.end
         else:
-            self._commits.insert(index, new_commit)
+            self._pending_commits.insert(index, new_commit)
 
     def _add_waiter(self, end_offset: int) -> "PartitionSession.CommitAckWaiter":
         waiter = PartitionSession.CommitAckWaiter(end_offset, self._create_future())
@@ -117,20 +117,31 @@ class PartitionSession:
             return asyncio.Future()
 
     def pop_commit_range(self) -> Optional[OffsetsRange]:
-        if len(self._commits) == 0:
+        if len(self._pending_commits) == 0:
             return None
 
-        if self._commits[0].start != self._send_commit_window_start:
+        if self._pending_commits[0].start != self._send_commit_window_start:
             return None
 
-        res = self._commits.popleft()
-        while len(self._commits) > 0 and self._commits[0].start == res.end:
-            commit = self._commits.popleft()
+        res = self._pending_commits.popleft()
+        while len(self._pending_commits) > 0 and self._pending_commits[0].start == res.end:
+            commit = self._pending_commits.popleft()
             res.end = commit.end
 
         self._send_commit_window_start = res.end
 
         return res
+
+    def ack_notify(self, offset: int):
+        if len(self._ack_waiters) == 0:
+            # todo log warning
+            # must be never receive ack for not sended request
+            return
+
+        while len(self._ack_waiters) > 0:
+            if self._ack_waiters[0].end_offset <= offset:
+                waiter = self._ack_waiters.popleft()
+                waiter.future.set_result(None)
 
     class State(enum.Enum):
         Active = 1

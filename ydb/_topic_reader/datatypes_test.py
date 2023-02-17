@@ -26,6 +26,9 @@ class TestPartitionSession:
             reader_stream_id=1,
         )
 
+    def test_ack_notify(self):
+        raise NotImplementedError()
+
     def test_add_commit(self, session):
         commit = OffsetsRange(self.session_comitted_offset, self.session_comitted_offset+5)
         waiter = session.add_commit(commit)
@@ -77,13 +80,13 @@ class TestPartitionSession:
                         add: OffsetsRange,
                         result: Union[List[OffsetsRange], Type[Exception]],
                         ):
-        session._commits = copy.deepcopy(original)
+        session._pending_commits = copy.deepcopy(original)
         if isinstance(result, type) and issubclass(result, Exception):
             with pytest.raises(result):
                 session._add_to_commits(add)
         else:
             session._add_to_commits(add)
-            assert session._commits == result
+            assert session._pending_commits == result
 
     # noinspection PyTypeChecker
     @pytest.mark.parametrize(
@@ -210,10 +213,10 @@ class TestPartitionSession:
                               ):
         send_commit_window_start = session._send_commit_window_start
 
-        session._commits = deque(commits)
+        session._pending_commits = deque(commits)
         res = session.pop_commit_range()
         assert res == result
-        assert session._commits == deque(rest)
+        assert session._pending_commits == deque(rest)
 
         if res is None:
             assert session._send_commit_window_start == send_commit_window_start
