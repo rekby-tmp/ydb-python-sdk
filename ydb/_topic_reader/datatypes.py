@@ -152,6 +152,8 @@ class PartitionSession:
             if self._ack_waiters[0].end_offset <= offset:
                 waiter = self._ack_waiters.popleft()
                 waiter.future.set_result(None)
+            else:
+                break
 
     class State(enum.Enum):
         Active = 1

@@ -384,6 +384,8 @@ class ReaderStream:
                 _process_response(message.server_status)
                 if isinstance(message.server_message, StreamReadMessage.ReadResponse):
                     self._on_read_response(message.server_message)
+                elif isinstance(message.server_message, StreamReadMessage.CommitOffsetResponse):
+                    self._on_commit_response(message.server_message)
                 elif isinstance(
                     message.server_message,
                     StreamReadMessage.StartPartitionSessionRequest,
@@ -466,6 +468,14 @@ class ReaderStream:
         batches = self._read_response_to_batches(message)
         self._message_batches.extend(batches)
         self._buffer_consume_bytes(message.bytes_size)
+
+    def _on_commit_response(self, message: StreamReadMessage.CommitOffsetResponse):
+        for partition_offset in message.partitions_committed_offsets:
+            try:
+                session = self._partition_sessions[partition_offset.partition_session_id]
+            except KeyError:
+                continue
+            session.ack_notify(partition_offset.committed_offset)
 
     def _buffer_consume_bytes(self, bytes_size):
         self._buffer_size_bytes -= bytes_size

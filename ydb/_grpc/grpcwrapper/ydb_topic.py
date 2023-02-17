@@ -569,7 +569,7 @@ class StreamReadMessage:
 
     @dataclass
     class CommitOffsetResponse:
-        partitions_committed_offsets: List["PartitionCommittedOffset"]
+        partitions_committed_offsets: List["StreamReadMessage.CommitOffsetResponse.PartitionCommittedOffset"]
 
         @dataclass
         class PartitionCommittedOffset:
