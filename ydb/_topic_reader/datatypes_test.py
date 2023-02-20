@@ -9,6 +9,8 @@ from typing import List, Optional, Type, TypeVar, Union
 import pytest
 
 from ydb._grpc.grpcwrapper.ydb_topic import OffsetsRange
+from ydb._topic_common.test_helpers import wait_for_fast, wait_condition
+from ydb._topic_reader import topic_reader_asyncio
 from ydb._topic_reader.datatypes import PartitionSession
 
 
@@ -62,11 +64,11 @@ class TestPartitionSession:
             [PartitionSession.CommitAckWaiter(offset, asyncio.Future()) for offset in offsets_waited_rest]
         )
 
-        for i in range(1000):
-            await asyncio.sleep(0)
+        await wait_condition(lambda: len(notified) == len(offsets_notified))
 
         notified.sort()
         assert notified == offsets_notified
+        assert session.committed_offset == notify_offset
 
     def test_add_commit(self, session):
         commit = OffsetsRange(self.session_comitted_offset, self.session_comitted_offset + 5)
@@ -206,6 +208,17 @@ class TestPartitionSession:
 
         index = bisect.bisect_left(session._ack_waiters, res)
         assert res is session._ack_waiters[index]
+
+    def test_close_notify_waiters(self, session):
+        waiter = session._add_waiter(session.committed_offset+1)
+        session.close()
+
+        with pytest.raises(topic_reader_asyncio.TopicReaderCommitToExpiredPartition):
+            waiter.future.result()
+
+    def test_close_twice(self, session):
+        session.close()
+        session.close()
 
     @pytest.mark.parametrize(
         "commits,result,rest",

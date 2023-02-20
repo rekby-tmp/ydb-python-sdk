@@ -36,10 +36,6 @@ class TopicReaderCommitToExpiredPartition(TopicReaderError):
     It is ok - the message/batch will not commit to server and will receive in other read session
     (with this or other reader).
     """
-    pass
-
-
-class TopicReaderPartitionSessionClosed(TopicReaderError):
     def __init__(self):
         super().__init__("Topic reader partition session is closed")
 
@@ -236,6 +232,9 @@ class ReaderReconnector:
 
     def receive_batch_nowait(self):
         return self._stream_reader.receive_batch_nowait()
+
+    def commit(self, batch: datatypes.ICommittable):
+        self._stream_reader.commit(batch)
 
     async def close(self):
         await self._stream_reader.close()

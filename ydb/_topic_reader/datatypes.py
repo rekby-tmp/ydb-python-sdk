@@ -149,6 +149,8 @@ class PartitionSession:
     def ack_notify(self, offset: int):
         self._ensure_not_closed()
 
+        self.committed_offset = offset
+
         if len(self._ack_waiters) == 0:
             # todo log warning
             # must be never receive ack for not sended request
@@ -164,17 +166,17 @@ class PartitionSession:
     def close(self):
         try:
             self._ensure_not_closed()
-        except topic_reader_asyncio.TopicReaderPartitionSessionClosed:
+        except topic_reader_asyncio.TopicReaderCommitToExpiredPartition:
             return
 
         self.state = PartitionSession.State.Stopped
-        exception = topic_reader_asyncio.TopicReaderPartitionSessionClosed()
+        exception = topic_reader_asyncio.TopicReaderCommitToExpiredPartition()
         for waiter in self._ack_waiters:
             waiter.future.set_exception(exception)
 
     def _ensure_not_closed(self):
         if self.state == PartitionSession.State.Stopped:
-            raise topic_reader_asyncio.TopicReaderPartitionSessionClosed()
+            raise topic_reader_asyncio.TopicReaderCommitToExpiredPartition()
 
     class State(enum.Enum):
         Active = 1
