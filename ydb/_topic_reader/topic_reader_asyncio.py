@@ -36,8 +36,8 @@ class TopicReaderCommitToExpiredPartition(TopicReaderError):
     It is ok - the message/batch will not commit to server and will receive in other read session
     (with this or other reader).
     """
-    def __init__(self):
-        super().__init__("Topic reader partition session is closed")
+    def __init__(self, message: str = "Topic reader partition session is closed"):
+        super().__init__(message)
 
 
 class TopicReaderStreamClosedError(TopicReaderError):
@@ -80,7 +80,7 @@ class PublicAsyncIOReader:
 
     def messages(
         self, *, timeout: typing.Union[float, None] = None
-    ) -> typing.AsyncIterable["PublicMessage"]:
+    ) -> typing.AsyncIterable[topic_reader.PublicMessage]:
         """
         Block until receive new message
 
@@ -88,7 +88,7 @@ class PublicAsyncIOReader:
         """
         raise NotImplementedError()
 
-    async def receive_message(self) -> typing.Union["PublicMessage", None]:
+    async def receive_message(self) -> typing.Union[topic_reader.PublicMessage, None]:
         """
         Block until receive new message
 
@@ -116,7 +116,7 @@ class PublicAsyncIOReader:
         *,
         max_messages: typing.Union[int, None] = None,
         max_bytes: typing.Union[int, None] = None,
-    ) -> typing.Union["PublicBatch", None]:
+    ) -> typing.Union[topic_reader.PublicBatch, None]:
         """
         Get one messages batch from reader.
         All messages in a batch from same partition.
@@ -134,24 +134,25 @@ class PublicAsyncIOReader:
         """
         raise NotImplementedError()
 
-    def commit(self, mess: datatypes.ICommittable):
+    def commit(self, batch: typing.Union[datatypes.PublicMessage, datatypes.PublicBatch]):
         """
         Write commit message to a buffer.
 
         For the method no way check the commit result
         (for example if lost connection - commits will not re-send and committed messages will receive again)
         """
-        raise NotImplementedError()
+        self._reconnector.commit(batch)
 
     async def commit_with_ack(
-        self, mess: datatypes.ICommittable
-    ) -> typing.Union[topic_reader.CommitResult, typing.List[topic_reader.CommitResult]]:
+        self, batch: typing.Union[datatypes.PublicMessage, datatypes.PublicBatch]
+    ):
         """
         write commit message to a buffer and wait ack from the server.
 
         use asyncio.wait_for for wait with timeout.
         """
-        raise NotImplementedError()
+        waiter = self._reconnector.commit(batch)
+        await waiter.future
 
     async def flush(self):
         """
@@ -233,7 +234,7 @@ class ReaderReconnector:
     def receive_batch_nowait(self):
         return self._stream_reader.receive_batch_nowait()
 
-    def commit(self, batch: datatypes.ICommittable):
+    def commit(self, batch: datatypes.ICommittable) -> datatypes.PartitionSession.CommitAckWaiter:
         self._stream_reader.commit(batch)
 
     async def close(self):
