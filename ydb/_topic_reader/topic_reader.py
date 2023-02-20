@@ -14,7 +14,6 @@ from .datatypes import ICommittable, PublicBatch, PublicMessage
 from .._topic_common.common import TokenGetterFuncType
 from .._grpc.grpcwrapper.ydb_topic import StreamReadMessage, OffsetsRange
 
-
 class Selector:
     path: str
     partitions: Union[None, int, List[int]]

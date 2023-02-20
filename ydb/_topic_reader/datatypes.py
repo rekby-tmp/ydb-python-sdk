@@ -10,6 +10,7 @@ import datetime
 from typing import Mapping, Union, Any, List, Dict, Deque, Optional, NamedTuple
 
 from ydb._grpc.grpcwrapper.ydb_topic import OffsetsRange
+from ydb._topic_reader import topic_reader_asyncio
 
 
 class ICommittable(abc.ABC):
@@ -74,6 +75,8 @@ class PartitionSession:
 
     # todo: check if deque is optimal
     _ack_waiters: Deque["PartitionSession.CommitAckWaiter"] = field(init=False, default_factory=lambda: deque())
+
+    _state_changed: asyncio.Event = field(init=False, default_factory=lambda: asyncio.Event(), compare=False)
     _loop: Optional[asyncio.AbstractEventLoop] = field(init=False)  # may be None in tests
 
     def __post_init__(self):
@@ -85,10 +88,9 @@ class PartitionSession:
         except RuntimeError:
             self._loop = None
 
-    def stop(self):
-        self.state = PartitionSession.State.Stopped
-
     def add_commit(self, new_commit: OffsetsRange) -> "PartitionSession.CommitAckWaiter":
+        self._ensure_not_closed()
+
         self._add_to_commits(new_commit)
         return self._add_waiter(new_commit.end)
 
@@ -127,6 +129,8 @@ class PartitionSession:
             return asyncio.Future()
 
     def pop_commit_range(self) -> Optional[OffsetsRange]:
+        self._ensure_not_closed()
+
         if len(self._pending_commits) == 0:
             return None
 
@@ -143,6 +147,8 @@ class PartitionSession:
         return res
 
     def ack_notify(self, offset: int):
+        self._ensure_not_closed()
+
         if len(self._ack_waiters) == 0:
             # todo log warning
             # must be never receive ack for not sended request
@@ -154,6 +160,21 @@ class PartitionSession:
                 waiter.future.set_result(None)
             else:
                 break
+
+    def close(self):
+        try:
+            self._ensure_not_closed()
+        except topic_reader_asyncio.TopicReaderPartitionSessionClosed:
+            return
+
+        self.state = PartitionSession.State.Stopped
+        exception = topic_reader_asyncio.TopicReaderPartitionSessionClosed()
+        for waiter in self._ack_waiters:
+            waiter.future.set_exception(exception)
+
+    def _ensure_not_closed(self):
+        if self.state == PartitionSession.State.Stopped:
+            raise topic_reader_asyncio.TopicReaderPartitionSessionClosed()
 
     class State(enum.Enum):
         Active = 1

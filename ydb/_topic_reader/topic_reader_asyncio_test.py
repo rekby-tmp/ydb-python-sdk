@@ -8,7 +8,7 @@ from unittest import mock
 import pytest
 
 from ydb import issues
-from . import datatypes
+from . import datatypes, topic_reader_asyncio
 from .datatypes import PublicBatch, PublicMessage
 from .topic_reader import PublicReaderSettings
 from .topic_reader_asyncio import ReaderStream, ReaderReconnector
@@ -337,8 +337,12 @@ class TestReaderStream:
         await wait_for_fast(waiter1.future)
         await wait_for_fast(waiter2.future)
 
-    async def test_close_ack_waiters_when_close_stream_reader(self):
-        raise NotImplementedError()
+    async def test_close_ack_waiters_when_close_stream_reader(self, stream_reader_started, partition_session):
+        waiter = partition_session._add_waiter(self.partition_session_committed_offset+1)
+        await wait_for_fast(stream_reader_started.close())
+
+        with pytest.raises(topic_reader_asyncio.TopicReaderPartitionSessionClosed):
+            waiter.future.result()
 
     async def test_commit_ranges_for_received_messages(self, stream, stream_reader_started: ReaderStream,
                                                        partition_session):

@@ -39,6 +39,11 @@ class TopicReaderCommitToExpiredPartition(TopicReaderError):
     pass
 
 
+class TopicReaderPartitionSessionClosed(TopicReaderError):
+    def __init__(self):
+        super().__init__("Topic reader partition session is closed")
+
+
 class TopicReaderStreamClosedError(TopicReaderError):
     def __init__(self):
         super().__init__("Topic reader stream is closed")
@@ -453,7 +458,7 @@ class ReaderStream:
             return
 
         del self._partition_sessions[message.partition_session_id]
-        partition.stop()
+        partition.close()
 
         if message.graceful:
             self._stream.write(
@@ -564,6 +569,9 @@ class ReaderStream:
         self._closed = True
         self._set_first_error(TopicReaderStreamClosedError())
         self._state_changed.set()
+
+        for session in self._partition_sessions.values():
+            session.close()
 
         for task in self._background_tasks:
             task.cancel()
