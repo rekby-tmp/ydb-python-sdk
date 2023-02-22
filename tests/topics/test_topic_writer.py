@@ -18,7 +18,7 @@ class TestTopicWriterAsyncIO:
             producer_and_message_group_id="test",
             auto_seqno=False,
         ) as writer:
-            await writer.write_with_ack(
+            await writer.write_with_ack_future(
                 ydb.TopicWriterMessage(data="123".encode(), seqno=5)
             )
 
